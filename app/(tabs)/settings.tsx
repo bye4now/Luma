@@ -1,11 +1,12 @@
 import React from 'react';
+import { Alert } from 'react-native';
+import { scheduleDailyReminder8am } from "../../utils/notifications";
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -130,18 +131,34 @@ export default function SettingsScreen() {
       subtitle: 'Manage your account',
       onPress: () => Alert.alert('Coming soon', 'Profile settings coming soon!'),
     },
-    {
-      icon: Bell,
-      title: 'Notifications',
-      subtitle: 'Daily reminders and insights',
-      onPress: () => Alert.alert('Coming soon', 'Notification settings coming soon!'),
-    },
-    {
-      icon: Palette,
-      title: 'Appearance',
-      subtitle: 'Themes and display options',
-      onPress: () => Alert.alert('Coming soon', 'Appearance settings coming soon!'),
-    },
+{
+  icon: Bell,
+  title: 'Notifications',
+  subtitle: 'Daily reminders and insights',
+  onPress: async () => {
+    const res = await scheduleDailyReminder8am();
+
+    if (!res.ok) {
+      Alert.alert(
+        "Notifications Off",
+        "Please enable notifications for LUMA in your phone settings, then try again."
+      );
+      return;
+    }
+
+    Alert.alert(
+      "Daily Reminder Set",
+      "Done — we’ll remind you every day at 8:00am (local time)."
+    );
+  },
+},
+{
+  icon: Palette,
+  title: 'Appearance',
+  subtitle: 'Themes and display options',
+  onPress: () => Alert.alert('Coming soon', 'Appearance settings coming soon!'),
+},
+
     {
       icon: Download,
       title: 'Export Data (PDF)',

@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -7,14 +7,41 @@ import {
   ScrollView,
   Modal,
   Image,
+  Linking,
+  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { router } from 'expo-router';
-import { X, Check, Star } from 'lucide-react-native';
+import { X, Check } from 'lucide-react-native';
 import { useSubscription } from '@/hooks/useSubscription';
 import { colors } from '@/constants/colors';
 import LumaLogo from '@/assets/images/LUMA_App_Icon_512px.png';
+
+// Optional: If you have expo-application installed
+// npm i expo-application
+let getAppId: (() => string | null) | null = null;
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const Application = require('expo-application');
+  getAppId = () => Application.applicationId ?? null;
+} catch {
+  getAppId = () => null;
+}
+
+function openPlayStoreSubscriptions(productId?: string) {
+  const packageName = getAppId?.() || undefined;
+
+  // Best deep link (works if packageName + sku are provided)
+  if (Platform.OS === 'android' && packageName && productId) {
+    const url = `https://play.google.com/store/account/subscriptions?package=${packageName}&sku=${productId}`;
+    Linking.openURL(url);
+    return;
+  }
+
+  // Fallback
+  Linking.openURL('https://play.google.com/store/account/subscriptions');
+}
 
 export default function SubscriptionScreen() {
   const insets = useSafeAreaInsets();
@@ -22,19 +49,48 @@ export default function SubscriptionScreen() {
     subscriptionStatus,
     plans,
     isProcessing,
+    isLoading,
     isPremium,
     trialDaysRemaining,
     daysUntilExpiry,
     subscribe,
-    cancelSubscription,
-    reactivateSubscription,
+    restorePurchases,
   } = useSubscription();
 
-  const defaultPlanId = useMemo(() => plans?.[1]?.id ?? plans?.[0]?.id ?? 'yearly_premium', [plans]);
-  const [selectedPlan, setSelectedPlan] = useState(defaultPlanId);
+  const [selectedPlan, setSelectedPlan] = useState<string | null>(null);
   const [showCancelModal, setShowCancelModal] = useState(false);
 
+  // ✅ Set a default plan once plans are loaded
+  useEffect(() => {
+    if (!selectedPlan && (plans?.length ?? 0) > 0) {
+      setSelectedPlan(plans[0].id);
+    }
+  }, [plans, selectedPlan]);
+
+  // ✅ Show a proper loading screen while RevenueCat loads offerings/plans
+  if (isLoading) {
+    return (
+      <LinearGradient
+        colors={['#000000', '#025067', '#6C0E42']}
+        style={[
+          styles.container,
+          {
+            paddingTop: insets.top,
+            justifyContent: 'center',
+            alignItems: 'center',
+          },
+        ]}
+      >
+        <Text style={{ color: '#b8dda0', fontSize: 16, opacity: 0.9 }}>
+          Loading subscription…
+        </Text>
+      </LinearGradient>
+    );
+  }
+
   const handleSubscribe = async () => {
+    if (!selectedPlan) return;
+
     try {
       await subscribe(selectedPlan);
       router.back();
@@ -43,29 +99,14 @@ export default function SubscriptionScreen() {
     }
   };
 
-  const handleCancel = async () => {
-    try {
-      await cancelSubscription();
-      setShowCancelModal(false);
-    } catch (error) {
-      console.error('Failed to cancel subscription:', error);
-    }
-  };
-
-  const handleReactivate = async () => {
-    try {
-      await reactivateSubscription();
-    } catch (error) {
-      console.error('Failed to reactivate subscription:', error);
-    }
-  };
+  // SKU used for Play Store “manage subscription” deep link
+  const activeSku = subscriptionStatus.plan?.productIdentifier;
 
   return (
     <LinearGradient
       colors={['#000000', '#025067', '#6C0E42']}
       style={[styles.container, { paddingTop: insets.top }]}
     >
-      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.closeButton}>
           <X size={24} color="#2b7879" />
@@ -82,7 +123,6 @@ export default function SubscriptionScreen() {
         ]}
         showsVerticalScrollIndicator={false}
       >
-        {/* Current Status */}
         {isPremium && (
           <View style={styles.statusCard}>
             <View style={styles.statusHeader}>
@@ -91,7 +131,9 @@ export default function SubscriptionScreen() {
             </View>
 
             {subscriptionStatus.isTrialActive && trialDaysRemaining !== null && (
-              <Text style={styles.statusSubtitle}>{trialDaysRemaining} days left in your free trial</Text>
+              <Text style={styles.statusSubtitle}>
+                {trialDaysRemaining} days left in your free trial
+              </Text>
             )}
 
             {!subscriptionStatus.isTrialActive && daysUntilExpiry !== null && (
@@ -107,7 +149,6 @@ export default function SubscriptionScreen() {
           </View>
         )}
 
-        {/* Hero Section */}
         <View style={styles.heroSection}>
           <View style={styles.heroIcon}>
             <Image source={LumaLogo} style={styles.lumaIconHero} />
@@ -118,7 +159,6 @@ export default function SubscriptionScreen() {
           </Text>
         </View>
 
-        {/* Features */}
         <View style={styles.featuresSection}>
           <Text style={styles.sectionTitle}>Premium Features</Text>
           <View style={styles.featuresList}>
@@ -144,10 +184,10 @@ export default function SubscriptionScreen() {
           </View>
         </View>
 
-        {/* Plans */}
         {!isPremium && (
           <View style={styles.plansSection}>
             <Text style={styles.sectionTitle}>Choose Your Plan</Text>
+
             <View style={styles.plansList}>
               {plans.map((plan) => {
                 const isSelected = selectedPlan === plan.id;
@@ -186,10 +226,8 @@ export default function SubscriptionScreen() {
                       </Text>
                     </View>
 
-                    {plan.period === 'yearly' && <Text style={styles.planSavings}>Save 17% vs monthly</Text>}
-
                     <Text style={[styles.planTrial, { color: isSelected ? '#374151' : '#7fb8b9' }]}>
-                      {plan.trialDays} days free trial
+                      {plan.trialDays ? `${plan.trialDays} days free trial` : 'No free trial'}
                     </Text>
 
                     <View style={styles.planFeatures}>
@@ -209,51 +247,40 @@ export default function SubscriptionScreen() {
           </View>
         )}
 
-        {/* Footer actions (NOT absolute — fixes the “locked banner” + touch issues) */}
         <View style={styles.footer}>
-          {subscriptionStatus.isTrialActive ? (
-            <TouchableOpacity
-              style={[styles.primaryButton, isProcessing && styles.buttonDisabled]}
-              onPress={handleSubscribe}
-              disabled={isProcessing}
-            >
-              <LinearGradient colors={['#2b7879', '#1a5a5b']} style={styles.buttonGradient}>
-                <Image source={LumaLogo} style={styles.lumaIconButton} />
-                <Text style={styles.primaryButtonText}>{isProcessing ? 'Processing...' : 'Upgrade to Premium'}</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          ) : !isPremium ? (
-            <TouchableOpacity
-              style={[styles.primaryButton, isProcessing && styles.buttonDisabled]}
-              onPress={handleSubscribe}
-              disabled={isProcessing}
-            >
-              <LinearGradient colors={['#2b7879', '#1a5a5b']} style={styles.buttonGradient}>
-                <Image source={LumaLogo} style={styles.lumaIconButton} />
-                <Text style={styles.primaryButtonText}>{isProcessing ? 'Processing...' : 'Subscribe Now'}</Text>
-              </LinearGradient>
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.managementButtons}>
-              {subscriptionStatus.autoRenew ? (
-                <TouchableOpacity style={styles.cancelButton} onPress={() => setShowCancelModal(true)}>
-                  <Text style={styles.cancelButtonText}>Cancel Subscription</Text>
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity style={styles.reactivateButton} onPress={handleReactivate} disabled={isProcessing}>
-                  <Text style={styles.reactivateButtonText}>
-                    {isProcessing ? 'Processing...' : 'Reactivate Subscription'}
+          {!isPremium ? (
+            <>
+              <TouchableOpacity
+                style={[styles.primaryButton, (isProcessing || !selectedPlan) && styles.buttonDisabled]}
+                onPress={handleSubscribe}
+                disabled={isProcessing || !selectedPlan}
+              >
+                <LinearGradient colors={['#2b7879', '#1a5a5b']} style={styles.buttonGradient}>
+                  <Image source={LumaLogo} style={styles.lumaIconButton} />
+                  <Text style={styles.primaryButtonText}>
+                    {isProcessing ? 'Processing...' : 'Subscribe Now'}
                   </Text>
-                </TouchableOpacity>
-              )}
-            </View>
+                </LinearGradient>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.restoreButton, isProcessing && styles.buttonDisabled]}
+                onPress={restorePurchases}
+                disabled={isProcessing}
+              >
+                <Text style={styles.restoreText}>Restore Purchases</Text>
+              </TouchableOpacity>
+            </>
+          ) : (
+            <TouchableOpacity style={styles.cancelButton} onPress={() => setShowCancelModal(true)}>
+              <Text style={styles.cancelButtonText}>Manage in Play Store</Text>
+            </TouchableOpacity>
           )}
 
           <Text style={styles.disclaimer}>Cancel anytime. No commitments. Your data stays yours.</Text>
         </View>
       </ScrollView>
 
-      {/* Cancel Confirmation Modal */}
       <Modal
         visible={showCancelModal}
         transparent
@@ -262,21 +289,28 @@ export default function SubscriptionScreen() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.cancelModal}>
-            <Text style={styles.cancelModalTitle}>Cancel Subscription?</Text>
+            <Text style={styles.cancelModalTitle}>Manage Subscription</Text>
             <Text style={styles.cancelModalText}>
-              You&apos;ll lose access to premium features at the end of your current billing period. Your data will be preserved.
+              Google Play manages billing, upgrades, downgrades, and cancellation.
             </Text>
+
             <View style={styles.cancelModalButtons}>
-              <TouchableOpacity style={styles.cancelModalButton} onPress={() => setShowCancelModal(false)}>
-                <Text style={styles.cancelModalButtonText}>Keep Premium</Text>
+              <TouchableOpacity
+                style={styles.cancelModalButton}
+                onPress={() => setShowCancelModal(false)}
+              >
+                <Text style={styles.cancelModalButtonText}>Close</Text>
               </TouchableOpacity>
+
               <TouchableOpacity
                 style={[styles.cancelModalButton, styles.cancelModalConfirm]}
-                onPress={handleCancel}
-                disabled={isProcessing}
+                onPress={() => {
+                  setShowCancelModal(false);
+                  openPlayStoreSubscriptions(activeSku);
+                }}
               >
                 <Text style={[styles.cancelModalButtonText, styles.cancelModalConfirmText]}>
-                  {isProcessing ? 'Canceling...' : 'Cancel Subscription'}
+                  Open Play Store
                 </Text>
               </TouchableOpacity>
             </View>
@@ -328,8 +362,6 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 16,
-
-    // subtle glow
     shadowColor: '#2b7879',
     shadowOffset: { width: 0, height: 6 },
     shadowOpacity: 0.25,
@@ -371,8 +403,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#b8dda0',
     borderWidth: 3,
     borderColor: '#2b7879',
-
-    // subtle glow on selected plan
     shadowColor: '#2b7879',
     shadowOffset: { width: 0, height: 8 },
     shadowOpacity: 0.22,
@@ -397,13 +427,11 @@ const styles = StyleSheet.create({
   planPricing: { flexDirection: 'row', alignItems: 'baseline', marginBottom: 4 },
   planPrice: { fontSize: 32, fontWeight: '700' },
   planPeriod: { fontSize: 16, marginLeft: 4 },
-  planSavings: { fontSize: 12, color: '#4ade80', fontWeight: '600', marginBottom: 8 },
   planTrial: { fontSize: 14, marginBottom: 16 },
   planFeatures: { gap: 8 },
   planFeatureItem: { flexDirection: 'row', alignItems: 'center' },
   planFeatureText: { fontSize: 14, marginLeft: 8 },
 
-  // footer (no absolute!)
   footer: {
     marginTop: 16,
     backgroundColor: 'rgba(15, 15, 35, 0.45)',
@@ -431,7 +459,16 @@ const styles = StyleSheet.create({
   primaryButtonText: { fontSize: 16, fontWeight: '700', color: '#000000' },
   buttonDisabled: { opacity: 0.7 },
 
-  managementButtons: { marginBottom: 16 },
+  restoreButton: {
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.25)',
+    marginBottom: 12,
+  },
+  restoreText: { color: '#fff', fontWeight: '600' },
+
   cancelButton: {
     backgroundColor: 'transparent',
     borderWidth: 1,
@@ -439,15 +476,9 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingVertical: 16,
     alignItems: 'center',
+    marginBottom: 12,
   },
   cancelButtonText: { fontSize: 16, fontWeight: '600', color: '#ef4444' },
-  reactivateButton: {
-    backgroundColor: '#2b7879',
-    borderRadius: 12,
-    paddingVertical: 16,
-    alignItems: 'center',
-  },
-  reactivateButtonText: { fontSize: 16, fontWeight: '700', color: '#000000' },
 
   disclaimer: { fontSize: 12, color: 'rgba(212, 175, 55, 0.7)', textAlign: 'center', lineHeight: 16 },
 
@@ -481,8 +512,8 @@ const styles = StyleSheet.create({
   cancelModalButtonText: { fontSize: 16, fontWeight: '600', color: '#2b7879' },
   cancelModalConfirmText: { color: '#ef4444' },
 
-  // Luma logo sizes
   lumaIconSmall: { width: 22, height: 22, borderRadius: 6 },
   lumaIconHero: { width: 44, height: 44, borderRadius: 10 },
   lumaIconButton: { width: 22, height: 22, borderRadius: 6 },
 });
+

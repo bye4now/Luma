@@ -26,38 +26,87 @@ import { colors } from '@/constants/colors';
 import LumaLogo from '@/assets/images/LUMA_App_Icon_512px.png';
 
 export default function JournalScreen() {
-  const { entries, getActiveEntries, getArchivedEntries, getDeletedEntries, isLoading: journalLoading } = useJournal();
+  const {
+    entries,
+    getActiveEntries,
+    getArchivedEntries,
+    getDeletedEntries,
+    isLoading: journalLoading,
+  } = useJournal();
+
   const { canAddEntry, getEntryLimit, isLoading: premiumLoading } = usePremium();
   const insets = useSafeAreaInsets();
   const { hasBirthDate } = useHoroscope();
 
   const [selectedDate, setSelectedDate] = useState(new Date());
-  const [selectedViewMode, setSelectedViewMode] = useState<'active' | 'archived' | 'deleted'>('active');
+  const [selectedViewMode, setSelectedViewMode] = useState<
+    'active' | 'archived' | 'deleted'
+  >('active');
   const [showCalendar, setShowCalendar] = useState(false);
   const [showBirthDateSetup, setShowBirthDateSetup] = useState(false);
 
+  // ✅ Helper: compare days (ignoring time)
+  const isSameDay = (a: Date, b: Date) => {
+    const d1 = new Date(a);
+    const d2 = new Date(b);
+    d1.setHours(0, 0, 0, 0);
+    d2.setHours(0, 0, 0, 0);
+    return d1.getTime() === d2.getTime();
+  };
+
+  // ✅ All active entries (not archived, not deleted), newest first
+  const allActiveEntries = useMemo(() => {
+    if (journalLoading || !entries) return [];
+
+    return entries
+      .filter((entry) => {
+        if (!entry || !entry.date) return false;
+        const isActive = !entry.isArchivedToCalendar && !entry.isDeleted;
+        return isActive;
+      })
+      .sort((a, b) => {
+        const aTime = a?.date ? new Date(a.date).getTime() : 0;
+        const bTime = b?.date ? new Date(b.date).getTime() : 0;
+        return bTime - aTime; // newest first
+      });
+  }, [entries, journalLoading]);
+
+  // ✅ FIX: selectedEntries logic
   const selectedEntries = useMemo(() => {
     if (journalLoading || !entries) {
       console.log('🔵 [Home] selectedEntries: loading or no entries');
       return [];
     }
 
-    let result: typeof entries = [];
-
+    // Archived/Deleted behave the same as before
     if (selectedViewMode === 'archived') {
-      result = getArchivedEntries(selectedDate);
-    } else if (selectedViewMode === 'deleted') {
-      result = getDeletedEntries(selectedDate);
-    } else {
-      result = getActiveEntries(selectedDate);
+      return getArchivedEntries(selectedDate);
     }
 
-    console.log('🔵 [Home] selectedEntries calculated:', result.length);
-    console.log('🔵 [Home] Selected date:', selectedDate.toDateString());
-    console.log('🔵 [Home] View mode:', selectedViewMode);
+    if (selectedViewMode === 'deleted') {
+      return getDeletedEntries(selectedDate);
+    }
 
-    return result;
-  }, [entries, selectedDate, selectedViewMode, journalLoading, getActiveEntries, getArchivedEntries, getDeletedEntries]);
+    // ✅ Active view behavior:
+    // If looking at today -> show ALL active entries (so they don't "disappear" tomorrow)
+    if (isToday(selectedDate)) {
+      return allActiveEntries;
+    }
+
+    // If looking at another day -> show active entries for that day only
+    return allActiveEntries.filter((entry) => {
+      if (!entry?.date) return false;
+      return isSameDay(new Date(entry.date), selectedDate);
+    });
+  }, [
+    entries,
+    selectedDate,
+    selectedViewMode,
+    journalLoading,
+    getArchivedEntries,
+    getDeletedEntries,
+    allActiveEntries,
+  ]);
 
   const todaysEntries = useMemo(() => {
     if (journalLoading || !entries) {
@@ -69,7 +118,7 @@ export default function JournalScreen() {
     const tomorrow = new Date(today);
     tomorrow.setDate(tomorrow.getDate() + 1);
 
-    const result = entries.filter(entry => {
+    const result = entries.filter((entry) => {
       if (!entry || !entry.date) return false;
       const entryDate = new Date(entry.date);
       const isTodayHit = entryDate >= today && entryDate < tomorrow;
@@ -110,7 +159,10 @@ export default function JournalScreen() {
     setShowCalendar(true);
   };
 
-  const handleDateSelect = (date: Date, viewMode: 'active' | 'archived' | 'deleted') => {
+  const handleDateSelect = (
+    date: Date,
+    viewMode: 'active' | 'archived' | 'deleted'
+  ) => {
     console.warn('🔴 DATE SELECT CALLED');
     console.warn('🔴 Date:', date.toDateString());
     console.warn('🔴 View mode:', viewMode);
@@ -125,40 +177,38 @@ export default function JournalScreen() {
     setShowCalendar(false);
   };
 
-return (
-  <View style={styles.container}>
-    <ScrollView
-      style={styles.scrollView}
-      showsVerticalScrollIndicator={false}
-      contentContainerStyle={{
-        paddingTop: insets.top + 16,
-        paddingBottom: 12,
-      }}
-    >
-      {/* ✅ Logo is now INSIDE the ScrollView, so it scrolls */}
-      <View style={styles.logoContainer}>
-        <Image source={LumaLogo} style={styles.logo} resizeMode="contain" />
-      </View>
-
-      {/* Header */}
-      <View style={styles.header}>
-        <View style={styles.dateSection}>
-          <Text style={styles.dateDisplayText}>
-            {isToday(selectedDate) ? 'Today' : formatDate(selectedDate)}
-          </Text>
+  return (
+    <View style={styles.container}>
+      <ScrollView
+        style={styles.scrollView}
+        showsVerticalScrollIndicator={false}
+        contentContainerStyle={{
+          paddingTop: insets.top + 16,
+          paddingBottom: 12,
+        }}
+      >
+        {/* ✅ Logo is now INSIDE the ScrollView, so it scrolls */}
+        <View style={styles.logoContainer}>
+          <Image source={LumaLogo} style={styles.logo} resizeMode="contain" />
         </View>
 
-        <TouchableOpacity
-          style={styles.calendarButton}
-          onPress={handleDateChange}
-          activeOpacity={0.7}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <CalendarIcon size={28} color={colors.white} />
-        </TouchableOpacity>
-      </View>
+        {/* Header */}
+        <View style={styles.header}>
+          <View style={styles.dateSection}>
+            <Text style={styles.dateDisplayText}>
+              {isToday(selectedDate) ? 'Today' : formatDate(selectedDate)}
+            </Text>
+          </View>
 
-
+          <TouchableOpacity
+            style={styles.calendarButton}
+            onPress={handleDateChange}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <CalendarIcon size={28} color={colors.white} />
+          </TouchableOpacity>
+        </View>
 
         {/* Recording Section */}
         <View style={styles.recordingSection}>
@@ -170,7 +220,10 @@ return (
           </Text>
 
           <TouchableOpacity
-            style={[styles.recordButton, !canAddMoreEntries && styles.recordButtonDisabled]}
+            style={[
+              styles.recordButton,
+              !canAddMoreEntries && styles.recordButtonDisabled,
+            ]}
             onPress={handleVoiceRecord}
             disabled={!canAddMoreEntries}
           >
@@ -203,7 +256,10 @@ return (
             <Text style={styles.setupSubtitle}>
               Set your birth date to receive accurate horoscope readings
             </Text>
-            <TouchableOpacity style={styles.setupButton} onPress={() => setShowBirthDateSetup(true)}>
+            <TouchableOpacity
+              style={styles.setupButton}
+              onPress={() => setShowBirthDateSetup(true)}
+            >
               <Text style={styles.setupButtonText}>Set Birth Date</Text>
             </TouchableOpacity>
           </View>
@@ -216,20 +272,26 @@ return (
               {isToday(selectedDate) && selectedViewMode === 'active'
                 ? "Today's Reflections"
                 : selectedViewMode === 'active'
-                  ? `${formatDate(selectedDate)} Entries`
-                  : `${selectedViewMode.charAt(0).toUpperCase() + selectedViewMode.slice(1)} up to ${formatDate(selectedDate)}`}
+                ? `${formatDate(selectedDate)} Entries`
+                : `${selectedViewMode.charAt(0).toUpperCase() + selectedViewMode.slice(1)} up to ${formatDate(selectedDate)}`}
             </Text>
 
             <Text style={styles.entryCount}>
               {isToday(selectedDate) && selectedViewMode === 'active' ? (
                 <>
-                  {selectedEntries.length} active {selectedEntries.length === 1 ? 'entry' : 'entries'}
+                  {selectedEntries.length} active{' '}
+                  {selectedEntries.length === 1 ? 'entry' : 'entries'}
                   {entryLimit && (
-                    <Text style={styles.limitText}> ({todaysEntries.length}/{entryLimit})</Text>
+                    <Text style={styles.limitText}>
+                      {' '}
+                      ({todaysEntries.length}/{entryLimit})
+                    </Text>
                   )}
                 </>
               ) : (
-                `${selectedEntries.length} ${selectedEntries.length === 1 ? 'entry' : 'entries'}`
+                `${selectedEntries.length} ${
+                  selectedEntries.length === 1 ? 'entry' : 'entries'
+                }`
               )}
             </Text>
           </View>
@@ -255,8 +317,10 @@ return (
                     ? 'Your reflections will appear here'
                     : 'Daily limit reached - upgrade for unlimited entries'
                   : selectedViewMode === 'active'
-                    ? `No entries for ${formatDate(selectedDate)}`
-                    : `No ${selectedViewMode} entries up to ${formatDateShort(selectedDate)}`}
+                  ? `No entries for ${formatDate(selectedDate)}`
+                  : `No ${selectedViewMode} entries up to ${formatDateShort(
+                      selectedDate
+                    )}`}
               </Text>
             </View>
           ) : (
@@ -297,7 +361,10 @@ return (
         </View>
       </Modal>
 
-      <BirthDateSetup visible={showBirthDateSetup} onClose={() => setShowBirthDateSetup(false)} />
+      <BirthDateSetup
+        visible={showBirthDateSetup}
+        onClose={() => setShowBirthDateSetup(false)}
+      />
     </View>
   );
 }

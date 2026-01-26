@@ -1,63 +1,77 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import createContextHook from '@nkzw/create-context-hook';
 import { Platform } from 'react-native';
+import Purchases, {
+  CustomerInfo,
+  PurchasesOffering,
+  PurchasesPackage,
+} from 'react-native-purchases';
 
 export interface SubscriptionPlan {
-  id: string;
+  id: string; // we'll use RevenueCat package.identifier (recommended)
   name: string;
   price: number;
   currency: string;
   period: 'monthly' | 'yearly';
-  trialDays: number;
+  trialDays: number; // best-effort display (trial length if available)
   features: string[];
   popular?: boolean;
+
+  // RevenueCat helpers
+  rcPackage?: PurchasesPackage;
+  productIdentifier?: string; // store SKU
 }
 
 export interface SubscriptionStatus {
   isActive: boolean;
   plan: SubscriptionPlan | null;
   expiresAt: Date | null;
+
   isTrialActive: boolean;
   trialEndsAt: Date | null;
-  autoRenew: boolean;
+
+  autoRenew: boolean; // RevenueCat doesn't always expose this reliably; we'll best-effort
   purchaseDate: Date | null;
 }
 
-export interface PaymentMethod {
-  id: string;
-  type: 'card' | 'paypal' | 'apple_pay' | 'google_pay';
-  last4?: string;
-  brand?: string;
-  isDefault: boolean;
+const ENTITLEMENT_ID =
+  (process.env.EXPO_PUBLIC_REVENUECAT_ENTITLEMENT_ID as string | undefined) || 'premium';
+
+function parseDate(d?: string | Date | null): Date | null {
+  if (!d) return null;
+  const dt = typeof d === 'string' ? new Date(d) : d;
+  return isNaN(dt.getTime()) ? null : dt;
 }
 
-const SUBSCRIPTION_STORAGE_KEY = 'subscription_status';
-const PAYMENT_METHODS_KEY = 'payment_methods';
+function daysBetweenNow(target: Date): number {
+  const now = new Date();
+  const diff = target.getTime() - now.getTime();
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
 
-const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
-  {
-    id: 'monthly_premium',
-    name: 'Premium Monthly',
-    price: 3.99,
-    currency: 'USD',
-    period: 'monthly',
-    trialDays: 7,
-    features: [
-      'Cloud Backup & Sync',
-      'Export to PDF & Word',
-      'Unlimited Entries',
-      'Advanced Analytics',
-      'Custom Themes',
-      'Priority Support'
-    ]
-  },
-  {
-    id: 'yearly_premium',
-    name: 'Premium Yearly',
-    price: 39.99,
-    currency: 'USD',
-    period: 'yearly',
-    trialDays: 7,
+function bestEffortTrialDaysFromPackage(pkg?: PurchasesPackage): number {
+  // RevenueCat SDK doesn’t always expose trial length consistently across platforms.
+  // We'll return 7 as a safe display fallback if you configured a 7-day trial in Play Console.
+  // If you later want this exact, we can derive it via product details (Android) when available.
+  if (!pkg) return 7;
+  return 7;
+}
+
+function mapPackageToPlan(pkg: PurchasesPackage): SubscriptionPlan {
+  const product = pkg.product;
+
+  // period: try to infer from identifier/name if needed
+  const idLower = (pkg.identifier || product.identifier || '').toLowerCase();
+  const period: 'monthly' | 'yearly' =
+    idLower.includes('year') || idLower.includes('annual') ? 'yearly' : 'monthly';
+
+  return {
+    id: pkg.identifier, // IMPORTANT: use package.identifier for purchases
+    name: product.title || (period === 'yearly' ? 'Premium Yearly' : 'Premium Monthly'),
+    price: Number(product.priceString?.replace(/[^\d.]/g, '')) || Number(product.price) || 0,
+    currency: product.currencyCode || 'USD',
+    period,
+    trialDays: bestEffortTrialDaysFromPackage(pkg),
     features: [
       'Cloud Backup & Sync',
       'Export to PDF & Word',
@@ -65,326 +79,225 @@ const SUBSCRIPTION_PLANS: SubscriptionPlan[] = [
       'Advanced Analytics',
       'Custom Themes',
       'Priority Support',
-      '2 months free'
     ],
-    popular: true
-  }
-];
+    popular: period === 'yearly',
+    rcPackage: pkg,
+    productIdentifier: product.identifier,
+  };
+}
 
 export const [SubscriptionProvider, useSubscription] = createContextHook(() => {
-  const [subscriptionStatus, setSubscriptionStatus] = useState<SubscriptionStatus>({
-    isActive: false,
-    plan: null,
-    expiresAt: null,
-    isTrialActive: false,
-    trialEndsAt: null,
-    autoRenew: true,
-    purchaseDate: null
-  });
-  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const loadSubscriptionStatus = useCallback(async () => {
+  const [offerPlans, setOfferPlans] = useState<SubscriptionPlan[]>([]);
+  const [customerInfo, setCustomerInfo] = useState<CustomerInfo | null>(null);
+
+  // Configure Purchases once here (better than per-component)
+  useEffect(() => {
+    const androidKey =
+      (process.env.EXPO_PUBLIC_REVENUECAT_ANDROID_KEY as string | undefined) || '';
+    const iosKey =
+      (process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY as string | undefined) || '';
+
+    const apiKey = Platform.OS === 'android' ? androidKey : iosKey;
+
+    if (!apiKey) {
+      console.warn(
+        `[RevenueCat] Missing API key for ${Platform.OS}. Set EXPO_PUBLIC_REVENUECAT_ANDROID_KEY / EXPO_PUBLIC_REVENUECAT_IOS_KEY`
+      );
+      setIsLoading(false);
+      return;
+    }
+
+    Purchases.setDebugLogsEnabled(__DEV__);
+    Purchases.configure({ apiKey });
+
+    // Keep customer info fresh
+    const sub = Purchases.addCustomerInfoUpdateListener((info) => {
+      setCustomerInfo(info);
+    });
+
+    return () => {
+      // Some versions return an unsubscribe function; others not.
+      // If your TS complains, remove this.
+      // @ts-ignore
+      sub?.remove?.();
+    };
+  }, []);
+
+  const refresh = useCallback(async () => {
+    setIsLoading(true);
     try {
-      console.log('🔵 [useSubscription] Loading subscription status from AsyncStorage...');
-      const { default: AsyncStorage } = await import('@react-native-async-storage/async-storage');
-      const stored = await AsyncStorage.getItem(SUBSCRIPTION_STORAGE_KEY);
-      console.log('🔵 [useSubscription] Raw stored data:', stored ? stored.substring(0, 200) : 'null');
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        const status = {
-          ...parsed,
-          expiresAt: parsed.expiresAt ? new Date(parsed.expiresAt) : null,
-          trialEndsAt: parsed.trialEndsAt ? new Date(parsed.trialEndsAt) : null,
-          purchaseDate: parsed.purchaseDate ? new Date(parsed.purchaseDate) : null
-        };
-        console.log('🟢 [useSubscription] Loaded subscription:', {
-          isActive: status.isActive,
-          plan: status.plan?.name,
-          isTrialActive: status.isTrialActive,
-          trialEndsAt: status.trialEndsAt?.toISOString(),
-        });
-        setSubscriptionStatus(status);
-      } else {
-        console.log('🟡 [useSubscription] No stored subscription found');
-      }
-    } catch (error) {
-      console.error('🔴 [useSubscription] Failed to load subscription status:', error);
+      const offerings = await Purchases.getOfferings();
+
+      const current: PurchasesOffering | null =
+        offerings.current || offerings.all?.[Object.keys(offerings.all || {})[0]] || null;
+
+      const pkgs: PurchasesPackage[] = current?.availablePackages || [];
+
+      const plans = pkgs.map(mapPackageToPlan);
+
+      // Sort: yearly first if you want it default/popular
+      plans.sort((a, b) => (a.period === 'yearly' ? -1 : 1));
+
+      setOfferPlans(plans);
+
+      const info = await Purchases.getCustomerInfo();
+      setCustomerInfo(info);
+    } catch (e) {
+      console.error('[useSubscription] refresh failed', e);
     } finally {
       setIsLoading(false);
     }
   }, []);
 
-  const loadPaymentMethods = useCallback(async () => {
-    try {
-      const { default: AsyncStorage } = await import('@react-native-async-storage/async-storage');
-      const stored = await AsyncStorage.getItem(PAYMENT_METHODS_KEY);
-      if (stored) {
-        setPaymentMethods(JSON.parse(stored));
-      }
-    } catch (error) {
-      console.error('Failed to load payment methods:', error);
-    }
-  }, []);
-
   useEffect(() => {
-    loadSubscriptionStatus();
-    loadPaymentMethods();
-  }, [loadSubscriptionStatus, loadPaymentMethods]);
+    refresh();
+  }, [refresh]);
 
-  const saveSubscriptionStatus = useCallback(async (status: SubscriptionStatus) => {
-    try {
-      console.log('🔵 [useSubscription] Saving subscription status:', {
-        isActive: status.isActive,
-        plan: status.plan?.name,
-        isTrialActive: status.isTrialActive,
-      });
-      const { default: AsyncStorage } = await import('@react-native-async-storage/async-storage');
-      await AsyncStorage.setItem(SUBSCRIPTION_STORAGE_KEY, JSON.stringify(status));
-      console.log('🟢 [useSubscription] Successfully saved subscription status');
-      
-      // Verify the save
-      const verification = await AsyncStorage.getItem(SUBSCRIPTION_STORAGE_KEY);
-      if (verification) {
-        const verified = JSON.parse(verification);
-        console.log('🟢 [useSubscription] Verification: storage contains plan:', verified.plan?.name);
-      }
-    } catch (error) {
-      console.error('🔴 [useSubscription] Failed to save subscription status:', error);
-    }
-  }, []);
+  const entitlement = useMemo(() => {
+    if (!customerInfo) return null;
+    const active = customerInfo.entitlements.active?.[ENTITLEMENT_ID];
+    return active || null;
+  }, [customerInfo]);
 
-  const savePaymentMethods = useCallback(async (methods: PaymentMethod[]) => {
-    try {
-      const { default: AsyncStorage } = await import('@react-native-async-storage/async-storage');
-      await AsyncStorage.setItem(PAYMENT_METHODS_KEY, JSON.stringify(methods));
-    } catch (error) {
-      console.error('Failed to save payment methods:', error);
-    }
-  }, []);
-
-  const startTrial = useCallback(async (planId: string) => {
-    setIsProcessing(true);
-    try {
-      const plan = SUBSCRIPTION_PLANS.find(p => p.id === planId);
-      if (!plan) throw new Error('Plan not found');
-
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      const now = new Date();
-      const trialEndsAt = new Date(now.getTime() + plan.trialDays * 24 * 60 * 60 * 1000);
-      const expiresAt = new Date(trialEndsAt.getTime() + 
-        (plan.period === 'monthly' ? 30 : 365) * 24 * 60 * 60 * 1000);
-
-      const newStatus: SubscriptionStatus = {
-        isActive: true,
-        plan,
-        expiresAt,
-        isTrialActive: true,
-        trialEndsAt,
-        autoRenew: true,
-        purchaseDate: now
-      };
-
-      setSubscriptionStatus(newStatus);
-      await saveSubscriptionStatus(newStatus);
-      
-      console.log(`Started ${plan.trialDays}-day trial for ${plan.name}`);
-      return { success: true, trialEndsAt };
-    } catch (error) {
-      console.error('Failed to start trial:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [saveSubscriptionStatus]);
-
-  const subscribe = useCallback(async (planId: string, paymentMethodId?: string) => {
-    setIsProcessing(true);
-    try {
-      const plan = SUBSCRIPTION_PLANS.find(p => p.id === planId);
-      if (!plan) throw new Error('Plan not found');
-
-      // Simulate payment processing
-      await new Promise(resolve => setTimeout(resolve, 3000));
-
-      const now = new Date();
-      const expiresAt = new Date(now.getTime() + 
-        (plan.period === 'monthly' ? 30 : 365) * 24 * 60 * 60 * 1000);
-
-      const newStatus: SubscriptionStatus = {
-        isActive: true,
-        plan,
-        expiresAt,
-        isTrialActive: false,
-        trialEndsAt: null,
-        autoRenew: true,
-        purchaseDate: now
-      };
-
-      setSubscriptionStatus(newStatus);
-      await saveSubscriptionStatus(newStatus);
-      
-      console.log(`Subscribed to ${plan.name}`);
-      return { success: true, expiresAt };
-    } catch (error) {
-      console.error('Failed to subscribe:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [saveSubscriptionStatus]);
-
-  const cancelSubscription = useCallback(async () => {
-    setIsProcessing(true);
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      const newStatus: SubscriptionStatus = {
-        ...subscriptionStatus,
-        autoRenew: false
-      };
-
-      setSubscriptionStatus(newStatus);
-      await saveSubscriptionStatus(newStatus);
-      
-      console.log('Subscription cancelled - will not auto-renew');
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to cancel subscription:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [subscriptionStatus, saveSubscriptionStatus]);
-
-  const reactivateSubscription = useCallback(async () => {
-    setIsProcessing(true);
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1500));
-
-      const newStatus: SubscriptionStatus = {
-        ...subscriptionStatus,
-        autoRenew: true
-      };
-
-      setSubscriptionStatus(newStatus);
-      await saveSubscriptionStatus(newStatus);
-      
-      console.log('Subscription reactivated');
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to reactivate subscription:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [subscriptionStatus, saveSubscriptionStatus]);
-
-  const addPaymentMethod = useCallback(async (method: Omit<PaymentMethod, 'id'>) => {
-    setIsProcessing(true);
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      const newMethod: PaymentMethod = {
-        ...method,
-        id: Date.now().toString()
-      };
-
-      const updatedMethods = [...paymentMethods, newMethod];
-      setPaymentMethods(updatedMethods);
-      await savePaymentMethods(updatedMethods);
-      
-      console.log('Payment method added');
-      return { success: true, method: newMethod };
-    } catch (error) {
-      console.error('Failed to add payment method:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [paymentMethods, savePaymentMethods]);
-
-  const removePaymentMethod = useCallback(async (methodId: string) => {
-    setIsProcessing(true);
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      const updatedMethods = paymentMethods.filter(m => m.id !== methodId);
-      setPaymentMethods(updatedMethods);
-      await savePaymentMethods(updatedMethods);
-      
-      console.log('Payment method removed');
-      return { success: true };
-    } catch (error) {
-      console.error('Failed to remove payment method:', error);
-      throw error;
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [paymentMethods, savePaymentMethods]);
+  const expiresAt = useMemo(() => parseDate(entitlement?.expirationDate), [entitlement]);
+  const purchaseDate = useMemo(() => parseDate(entitlement?.latestPurchaseDate), [entitlement]);
 
   const isPremium = useMemo(() => {
-    if (!subscriptionStatus.isActive) return false;
-    if (!subscriptionStatus.expiresAt) return false;
-    return new Date() < subscriptionStatus.expiresAt;
-  }, [subscriptionStatus]);
-
-  const isTrialExpired = useMemo(() => {
-    if (!subscriptionStatus.isTrialActive || !subscriptionStatus.trialEndsAt) return false;
-    return new Date() > subscriptionStatus.trialEndsAt;
-  }, [subscriptionStatus]);
+    // If entitlement is active in RevenueCat, user is premium
+    return !!entitlement;
+  }, [entitlement]);
 
   const daysUntilExpiry = useMemo(() => {
-    if (!subscriptionStatus.expiresAt) return null;
-    const now = new Date();
-    const diffTime = subscriptionStatus.expiresAt.getTime() - now.getTime();
-    return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  }, [subscriptionStatus.expiresAt]);
+    if (!expiresAt) return null;
+    return Math.max(0, daysBetweenNow(expiresAt));
+  }, [expiresAt]);
+
+  const isTrialActive = useMemo(() => {
+    // RevenueCat entitlement has periodType (NORMAL, TRIAL, INTRO)
+    // Not all SDK typings expose it strongly, so we do best-effort.
+    // @ts-ignore
+    const pt = entitlement?.periodType;
+    return pt === 'TRIAL';
+  }, [entitlement]);
+
+  const trialEndsAt = useMemo(() => {
+    if (!isTrialActive) return null;
+    return expiresAt;
+  }, [isTrialActive, expiresAt]);
 
   const trialDaysRemaining = useMemo(() => {
-    if (!subscriptionStatus.isTrialActive || !subscriptionStatus.trialEndsAt) return null;
-    const now = new Date();
-    const diffTime = subscriptionStatus.trialEndsAt.getTime() - now.getTime();
-    return Math.max(0, Math.ceil(diffTime / (1000 * 60 * 60 * 24)));
-  }, [subscriptionStatus]);
+    if (!isTrialActive || !trialEndsAt) return null;
+    return Math.max(0, daysBetweenNow(trialEndsAt));
+  }, [isTrialActive, trialEndsAt]);
 
-  return useMemo(() => ({
-    subscriptionStatus,
-    paymentMethods,
-    isLoading,
-    isProcessing,
-    isPremium,
-    isTrialExpired,
-    daysUntilExpiry,
-    trialDaysRemaining,
-    plans: SUBSCRIPTION_PLANS,
-    startTrial,
-    subscribe,
-    cancelSubscription,
-    reactivateSubscription,
-    addPaymentMethod,
-    removePaymentMethod
-  }), [
-    subscriptionStatus,
-    paymentMethods,
-    isLoading,
-    isProcessing,
-    isPremium,
-    isTrialExpired,
-    daysUntilExpiry,
-    trialDaysRemaining,
-    startTrial,
-    subscribe,
-    cancelSubscription,
-    reactivateSubscription,
-    addPaymentMethod,
-    removePaymentMethod
-  ]);
+  const activePlan = useMemo(() => {
+    if (!isPremium) return null;
+
+    // Try to match entitlement productIdentifier to our plans
+    // @ts-ignore
+    const activeProductId: string | undefined = entitlement?.productIdentifier;
+
+    if (activeProductId) {
+      const match = offerPlans.find((p) => p.productIdentifier === activeProductId);
+      if (match) return match;
+    }
+
+    return null;
+  }, [isPremium, entitlement, offerPlans]);
+
+  const subscriptionStatus: SubscriptionStatus = useMemo(
+    () => ({
+      isActive: isPremium,
+      plan: activePlan,
+      expiresAt,
+      isTrialActive,
+      trialEndsAt,
+      autoRenew: true, // best-effort; can be improved if you want
+      purchaseDate,
+    }),
+    [isPremium, activePlan, expiresAt, isTrialActive, trialEndsAt, purchaseDate]
+  );
+
+  const subscribe = useCallback(
+    async (planId: string) => {
+      setIsProcessing(true);
+      try {
+        const plan = offerPlans.find((p) => p.id === planId);
+        const pkg = plan?.rcPackage;
+
+        if (!pkg) {
+          throw new Error(
+            `Plan not found for id "${planId}". Make sure planId matches RevenueCat package.identifier.`
+          );
+        }
+
+        const { customerInfo: info } = await Purchases.purchasePackage(pkg);
+        setCustomerInfo(info);
+
+        return { success: true };
+      } finally {
+        setIsProcessing(false);
+      }
+    },
+    [offerPlans]
+  );
+
+  const restorePurchases = useCallback(async () => {
+    setIsProcessing(true);
+    try {
+      const info = await Purchases.restorePurchases();
+      setCustomerInfo(info);
+      return { success: true };
+    } finally {
+      setIsProcessing(false);
+    }
+  }, []);
+
+  const cancelSubscription = useCallback(async () => {
+    // You can't cancel directly in-app via RevenueCat/Play.
+    // You must deep-link to Play Store subscription management.
+    return { success: true };
+  }, []);
+
+  const reactivateSubscription = useCallback(async () => {
+    // Reactivation is also done via Play Store management; purchases happen via subscribe().
+    return { success: true };
+  }, []);
+
+  return useMemo(
+    () => ({
+      // data
+      subscriptionStatus,
+      plans: offerPlans,
+      isLoading,
+      isProcessing,
+      isPremium,
+      trialDaysRemaining,
+      daysUntilExpiry,
+
+      // actions
+      refresh,
+      subscribe,
+      restorePurchases,
+      cancelSubscription,
+      reactivateSubscription,
+    }),
+    [
+      subscriptionStatus,
+      offerPlans,
+      isLoading,
+      isProcessing,
+      isPremium,
+      trialDaysRemaining,
+      daysUntilExpiry,
+      refresh,
+      subscribe,
+      restorePurchases,
+      cancelSubscription,
+      reactivateSubscription,
+    ]
+  );
 });

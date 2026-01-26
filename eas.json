@@ -1,6 +1,7 @@
 {
   "cli": {
-    "version": ">= 10.0.0"
+    "version": ">= 10.0.0",
+    "appVersionSource": "local"
   },
   "build": {
     "production": {
@@ -8,7 +9,9 @@
         "buildType": "app-bundle"
       },
       "env": {
-        "EXPO_BUN": "0"
+        "EXPO_BUN": "0",
+        "EXPO_PUBLIC_REVENUECAT_ANDROID_KEY": "goog_jNEHEKAfPecsfxfSDJOpKJDOkii",
+        "EXPO_PUBLIC_REVENUECAT_IOS_KEY": "appl_XXXX_YOUR_KEY_HERE"
       }
     }
   }
