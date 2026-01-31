@@ -5,66 +5,36 @@
     "version": "1.0.5",
     "orientation": "portrait",
     "icon": "./assets/images/LUMA_App_Icon_512px.png",
-    "scheme": "myapp",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+
     "splash": {
       "image": "./assets/images/LUMA_App_Icon_512px.png",
       "resizeMode": "contain",
       "backgroundColor": "#0B9FBD"
     },
+
     "android": {
-      "package": "com.bye4now.luma"
+      "package": "com.bye4now.luma",
+      "versionCode": 9
     },
-    "versionCode": 9,
+
     "adaptiveIcon": {
       "foregroundImage": "./assets/images/LUMA_App_Icon_512px.png",
       "backgroundColor": "#0B9FBD"
     },
+
     "permissions": [
       "RECORD_AUDIO",
       "VIBRATE"
     ],
+
     "extra": {
       "eas": {
-        "projectId": "3eb72231-3bcb-41d1-a50c-5fc398fba44e"
+        "projectId": "0115656f-c822-44c5-b0fb-9feb25cb53cb"
       }
     },
+
     "owner": "bye4now"
-  },
-  "ios": {
-    "supportsTablet": true,
-    "bundleIdentifier": "app.rork.voice-journal-horoscope",
-    "infoPlist": {
-      "UIBackgroundModes": [
-        "audio"
-      ],
-      "NSMicrophoneUsageDescription": "Allow $(PRODUCT_NAME) to access your microphone"
-    }
-  },
-  "web": {
-    "favicon": "./assets/images/favicon.png"
-  },
-  "plugins": [
-    [
-      "expo-router",
-      {
-        "origin": "https://rork.com/"
-      }
-    ],
-    [
-      "expo-av",
-      {
-        "microphonePermission": "Allow $(PRODUCT_NAME) to access your microphone"
-      }
-    ]
-  ],
-  "experiments": {
-    "typedRoutes": true
-  },
-  "extra": {
-    "eas": {
-      "projectId": "3eb72231-3bcb-41d1-a50c-5fc398fba44e"
-    }
   }
 }
